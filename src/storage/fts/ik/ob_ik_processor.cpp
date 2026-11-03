@@ -114,12 +114,9 @@ int TokenizeContext::current_char_and_type(const char *&ch, uint8_t &char_len, O
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
-                                          fulltext_ + cursor_,
-                                          fulltext_len_ - cursor_,
-                                          next_char_len_))) {
-  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
+  if (OB_FAIL(ObFTCharUtil::classify_first_valid_char(coll_type_,
                                                        fulltext_ + cursor_,
+                                                       fulltext_len_ - cursor_,
                                                        next_char_len_,
                                                        next_char_type_))) {
   }
