@@ -82,20 +82,12 @@ public:
 
 private:
   static const int64_t DEFAULT_STOPWORD_BUCKET_NUM = 37L;
-  static constexpr int BLOOM_BITS = 256;
-  static constexpr int BLOOM_WORDS = BLOOM_BITS / 64;
   typedef common::hash::ObHashSet<storage::ObFTWord> StopWordSet;
 
   StopWordSet stopword_set_;
   ObObjMeta stopword_type_;
-  uint64_t bloom_[BLOOM_WORDS];
 
   bool inited_ = false;
-  bool bloom_inited_ = false;
-
-  static uint64_t bloom_hash(const char *data, int64_t len, uint64_t seed);
-  void bloom_add(const char *data, int64_t len);
-  bool bloom_test(const char *data, int64_t len) const;
 
   static_assert(sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]) <= DEFAULT_STOPWORD_BUCKET_NUM,
               "ob_stop_word_list's number shouldn't be greater than DEFAULT_STOPWORD_BUCKET_NUM");

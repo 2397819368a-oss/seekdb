@@ -50,12 +50,9 @@ int ObStopWordChecker::init()
 
     stopword_type_.set_meta(stop_meta);
     const int64_t stopword_count = sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]);
-    memset(bloom_, 0, sizeof(bloom_));
     for (int64_t i = 0; OB_SUCC(ret) && i < stopword_count; ++i) {
       ObFTWord stopword(STRLEN(ob_stop_word_list[i]), ob_stop_word_list[i], stopword_type_);
       if (OB_FAIL(stopword_set_.set_refactored(stopword))) {
-      } else {
-        bloom_add(ob_stop_word_list[i], STRLEN(ob_stop_word_list[i]));
       }
     }
 
@@ -90,8 +87,6 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
       }
     }
     if (!may_be_stopword) {
-      is_stopword = false;
-    } else if (!bloom_test(word_str.ptr(), word_str.length())) {
       is_stopword = false;
     } else {
       ret = stopword_set_.exist_refactored(word);
@@ -129,33 +124,6 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
     }
   }
   return ret;
-}
-
-uint64_t ObStopWordChecker::bloom_hash(const char *data, int64_t len, uint64_t seed)
-{
-  // FNV-1a hash, fast path for stop word bloom filter
-  uint64_t h = 14695981039346656037ULL ^ seed;
-  for (int64_t i = 0; i < len; ++i) {
-    h ^= static_cast<uint8_t>(data[i]);
-    h *= 1099511628211ULL;
-  }
-  return h;
-}
-
-void ObStopWordChecker::bloom_add(const char *data, int64_t len)
-{
-  uint64_t h1 = bloom_hash(data, len, 0);
-  uint64_t h2 = bloom_hash(data, len, 1);
-  bloom_[(h1 >> 3) & (BLOOM_WORDS - 1)] |= 1ULL << (h1 & 63);
-  bloom_[(h2 >> 3) & (BLOOM_WORDS - 1)] |= 1ULL << (h2 & 63);
-}
-
-bool ObStopWordChecker::bloom_test(const char *data, int64_t len) const
-{
-  uint64_t h1 = bloom_hash(data, len, 0);
-  uint64_t h2 = bloom_hash(data, len, 1);
-  return (bloom_[(h1 >> 3) & (BLOOM_WORDS - 1)] & (1ULL << (h1 & 63))) &&
-         (bloom_[(h2 >> 3) & (BLOOM_WORDS - 1)] & (1ULL << (h2 & 63)));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
