@@ -284,8 +284,7 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
 {
   int ret = OB_SUCCESS;
   static int64_t FT_WORD_DOC_COL_CNT = 4;
-  static constexpr int64_t FT_MAX_WORD_BUCKET = 1999;
-  const int64_t ft_word_bkt_cnt = MIN(MAX(fulltext.length() / 5, 2), FT_MAX_WORD_BUCKET);
+  static constexpr int64_t FT_WORD_BUCKET_CNT = 251;
   int64_t doc_length = 0;
   ObFTWordMap ft_word_map;
   void *rows_buf = nullptr;
@@ -294,7 +293,7 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
     ret = OB_INVALID_ARGUMENT;
   } else if (0 == fulltext.length()) {
     ret = OB_ITER_END;
-  } else if (OB_FAIL(ft_word_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
+  } else if (OB_FAIL(ft_word_map.create(FT_WORD_BUCKET_CNT, common::ObMemAttr("FTWordMap")))) {
   } else if (OB_FAIL(segment_and_calc_word_count(allocator,
                                                  helper,
                                                  ft_obj_meta,
