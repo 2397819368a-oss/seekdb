@@ -18,7 +18,6 @@
 #define OCEANBASE_DAS_DOMAIN_UTILS_H
 
 #include "lib/allocator/page_arena.h"
-#include "lib/container/ob_se_array.h"
 #include "lib/hash/ob_hashset.h"
 #include "common/datum/ob_datum.h"
 #include "sql/das/ob_das_dml_ctx_define.h"
@@ -361,14 +360,7 @@ public:
     ft_doc_word_iter_(nullptr),
     ft_doc_word_allocator_(allocator),
     ft_parse_helper_(),
-    is_inited_(false),
-    ft_word_cache_alloc_(),
-    ft_word_cache_items_(),
-    ft_word_cache_rows_(),
-    pass_epoch_(0),
-    cache_epoch_(-1),
-    pass_row_cnt_(0),
-    cache_record_stopped_(false)
+    is_inited_(false)
   {
     ObDomainDMLIterator::mode_ = mode;
   }
@@ -396,61 +388,12 @@ protected:
   int scan_ft_word_rows(const ObChunkDatumStore::StoredRow *store_row);
   int build_ft_word_row(blocksstable::ObDatumRow *src_row, blocksstable::ObDatumRow *&dest_row);
 
-  // fts_index_aux 与 fts_doc_word_aux 只是列顺序不同，两者会各做一遍完整的分词。
-  // 这里把上一趟的分词结果缓存下来（独立的 arena，避免被行级 allocator_.reuse() 提前释放），
-  // 下一趟直接按需要的列顺序重建行，不再重复跑分词器。
-  static const int64_t MAX_CACHED_FT_ROWS = 1024;
-  static const int64_t MAX_CACHED_FT_ITEMS = 40000;
-  struct ObFTWordCacheItem
-  {
-    common::ObString word_;
-    int64_t word_cnt_;
-    int64_t doc_len_;
-  };
-  struct ObFTWordCacheRow
-  {
-    common::ObString ft_;
-    common::ObString parser_name_;
-    int64_t item_begin_;
-    int64_t item_count_;
-    int64_t obj_type_;
-    int64_t collation_type_;
-  };
-  int build_word_rows_from_cache(const ObFTWordCacheRow &cache_row,
-                                 const ObDatum &doc_id_datum,
-                                 const bool is_fts_index_aux);
-  bool is_word_row_cache_hit(const int64_t cur_idx,
-                             const ObString &ft,
-                             const common::ObObjMeta &ft_meta,
-                             const ObString &parser_name);
-  int generate_ft_word_rows_impl(const common::ObObjMeta &ft_meta,
-                                 const ObDatum &doc_id_datum,
-                                 const ObString &ft,
-                                 const ObString &parser_name,
-                                 const bool is_fts_index_aux,
-                                 const int64_t cur_idx,
-                                 const int64_t row_begin);
-  int record_ft_word_rows(const ObString &ft,
-                          const ObString &parser_name,
-                          const common::ObObjMeta &ft_meta,
-                          const bool is_fts_index_aux,
-                          const int64_t cur_idx,
-                          const int64_t row_begin);
-  void clear_ft_word_row_cache();
-
 private:
   const ObFTDocWordInfo *doc_word_info_;
   data_plane::ObFTDocWordIterator *ft_doc_word_iter_;
   common::ObArenaAllocator ft_doc_word_allocator_;
   storage::ObFTParseHelper ft_parse_helper_;
   bool is_inited_;
-  common::ObArenaAllocator ft_word_cache_alloc_;
-  common::ObSEArray<ObFTWordCacheItem, 64> ft_word_cache_items_;
-  common::ObSEArray<ObFTWordCacheRow, 32> ft_word_cache_rows_;
-  int64_t pass_epoch_;
-  int64_t cache_epoch_;
-  int64_t pass_row_cnt_;
-  bool cache_record_stopped_;
 };
 
 } // end namespace sql
