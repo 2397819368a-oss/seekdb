@@ -62,7 +62,7 @@ struct ObTokenizeHelperCacheEntry
   common::ObString reformed_properties_;
   bool valid_ = false;
 };
-constexpr int64_t TOKENIZE_HELPER_CACHE_SIZE = 4;
+constexpr int64_t TOKENIZE_HELPER_CACHE_SIZE = 8;
 struct ObTokenizeHelperCache
 {
   ObTokenizeHelperCacheEntry entries_[TOKENIZE_HELPER_CACHE_SIZE];
@@ -111,8 +111,8 @@ struct ObTokenizeResultCacheEntry
   bool valid_ = false;
 };
 constexpr int64_t TOKENIZE_RESULT_MAX_LENGTH = 65536;
-constexpr int64_t TOKENIZE_RESULT_CACHE_SLOTS = 32;
-constexpr int64_t TOKENIZE_REPEAT_HINT_SLOTS = 64;
+constexpr int64_t TOKENIZE_RESULT_CACHE_SLOTS = 64;
+constexpr int64_t TOKENIZE_REPEAT_HINT_SLOTS = 128;
 
 struct ObTokenizeResultCache
 {
@@ -239,7 +239,7 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
       hp = &entry.helper_; hp->rebind_allocator(&allocator); break;
     }
   }
-  const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 2, 2), 997);
+  const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 5, 3), 499);
   int64_t doc_len = 0;
   storage::ObFTWordMap token_map;
 
