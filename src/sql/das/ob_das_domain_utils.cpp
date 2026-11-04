@@ -844,7 +844,19 @@ void ObFTDMLIterator::reset()
   is_inited_ = false;
   data_plane::reset_ft_doc_word_iterator(ft_doc_word_iter_);
   ft_parse_helper_.reset();
+  clear_ft_word_row_cache();
+  pass_epoch_ = 0;
+  cache_epoch_ = -1;
+  pass_row_cnt_ = 0;
   ObDomainDMLIterator::reset();
+}
+
+void ObFTDMLIterator::clear_ft_word_row_cache()
+{
+  ft_word_cache_items_.reuse();
+  ft_word_cache_rows_.reuse();
+  ft_word_cache_alloc_.reuse();
+  cache_record_stopped_ = false;
 }
 
 ObFTDMLIterator::~ObFTDMLIterator()
@@ -855,6 +867,13 @@ ObFTDMLIterator::~ObFTDMLIterator()
 int ObFTDMLIterator::rewind()
 {
   int ret = OB_SUCCESS;
+  // 每趟完整写入开始前推进 epoch：缓存只能被紧邻的下一趟复用，更旧的缓存直接丢弃
+  ++pass_epoch_;
+  pass_row_cnt_ = 0;
+  if (cache_epoch_ + 1 < pass_epoch_ || 0 == ft_word_cache_rows_.count()) {
+    clear_ft_word_row_cache();
+    cache_epoch_ = pass_epoch_;
+  }
   row_idx_ = 0;
   if (das_ctdef_->table_param_.get_data_table().is_fts_index()) {
     if (OB_FAIL(ObDomainDMLIterator::rewind())) {
@@ -1024,17 +1043,170 @@ int ObFTDMLIterator::generate_ft_word_rows(const ObChunkDatumStore::StoredRow *s
   ObString ft;
   ObDatum doc_id_datum;
   const bool is_fts_index_aux = das_ctdef_->table_param_.get_data_table().is_fts_index_aux();
+  const ObString &cur_parser_name = das_ctdef_->table_param_.get_data_table().get_fts_parser_name();
+  const int64_t cur_idx = pass_row_cnt_++;
+  const int64_t row_begin = rows_.count();
 
   if (!is_update_ && OB_FAIL(get_ft_and_doc_id(store_row, doc_id_datum, ft, ft_meta))) {
   } else if (is_update_ && OB_FAIL(get_ft_and_doc_id_for_update(store_row, doc_id_datum, ft, ft_meta))) {
-  } else if (OB_FAIL(ObDASDomainUtils::generate_fulltext_word_rows(allocator_,
-                                                                   &ft_parse_helper_,
-                                                                   ft_meta,
-                                                                   doc_id_datum,
-                                                                   ft,
-                                                                   is_fts_index_aux,
-                                                                   rows_))) {
+  } else if (is_word_row_cache_hit(cur_idx, ft, ft_meta, cur_parser_name)) {
+    // 命中缓存：只按当前 aux 表的列顺序重建行，不再重复分词
+    // 空白文档在这里同样返回 OB_ITER_END，与直接分词的行为一致
+    ret = build_word_rows_from_cache(ft_word_cache_rows_.at(cur_idx), doc_id_datum, is_fts_index_aux);
+  } else if (OB_FAIL(generate_ft_word_rows_impl(ft_meta,
+                                                doc_id_datum,
+                                                ft,
+                                                cur_parser_name,
+                                                is_fts_index_aux,
+                                                cur_idx,
+                                                row_begin))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
+    }
+  }
+  return ret;
+}
+
+static bool word_cache_str_equal(const ObString &l, const ObString &r)
+{
+  bool eq = (l.length() == r.length());
+  for (int64_t i = 0; eq && i < l.length(); ++i) {
+    eq = (l.ptr()[i] == r.ptr()[i]);
+  }
+  return eq;
+}
+
+bool ObFTDMLIterator::is_word_row_cache_hit(const int64_t cur_idx,
+                                            const ObString &ft,
+                                            const common::ObObjMeta &ft_meta,
+                                            const ObString &parser_name)
+{
+  bool hit = false;
+  if (cache_epoch_ + 1 == pass_epoch_ && cur_idx < ft_word_cache_rows_.count()) {
+    const ObFTWordCacheRow &cache_row = ft_word_cache_rows_.at(cur_idx);
+    hit = (cache_row.obj_type_ == static_cast<int64_t>(ft_meta.get_type()))
+       && (cache_row.collation_type_ == static_cast<int64_t>(ft_meta.get_collation_type()))
+       && word_cache_str_equal(cache_row.parser_name_, parser_name)
+       && word_cache_str_equal(cache_row.ft_, ft);
+  }
+  return hit;
+}
+
+int ObFTDMLIterator::build_word_rows_from_cache(const ObFTWordCacheRow &cache_row,
+                                                const ObDatum &doc_id_datum,
+                                                const bool is_fts_index_aux)
+{
+  int ret = OB_SUCCESS;
+  const int64_t FT_WORD_DOC_COL_CNT = 4;
+  if (0 == cache_row.item_count_) {
+    ret = OB_ITER_END;
+  } else {
+    void *rows_buf = nullptr;
+    blocksstable::ObDatumRow *rows = nullptr;
+    if (OB_ISNULL(rows_buf = allocator_.alloc(cache_row.item_count_ * sizeof(blocksstable::ObDatumRow)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      rows = new (rows_buf) blocksstable::ObDatumRow[cache_row.item_count_];
+      for (int64_t i = 0; OB_SUCC(ret) && i < cache_row.item_count_; ++i) {
+        const ObFTWordCacheItem &item = ft_word_cache_items_.at(cache_row.item_begin_ + i);
+        if (OB_FAIL(rows[i].init(allocator_, FT_WORD_DOC_COL_CNT))) {
+        } else {
+          const int64_t word_idx = is_fts_index_aux ? 0 : 1;
+          const int64_t doc_id_idx = is_fts_index_aux ? 1 : 0;
+          rows[i].storage_datums_[word_idx].set_string(item.word_);
+          rows[i].storage_datums_[doc_id_idx].shallow_copy_from_datum(doc_id_datum);
+          rows[i].storage_datums_[2].set_uint(static_cast<uint64_t>(item.word_cnt_));
+          rows[i].storage_datums_[3].set_uint(static_cast<uint64_t>(item.doc_len_));
+          if (OB_FAIL(rows_.push_back(&rows[i]))) {
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObFTDMLIterator::generate_ft_word_rows_impl(const common::ObObjMeta &ft_meta,
+                                                const ObDatum &doc_id_datum,
+                                                const ObString &ft,
+                                                const ObString &parser_name,
+                                                const bool is_fts_index_aux,
+                                                const int64_t cur_idx,
+                                                const int64_t row_begin)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(ObDASDomainUtils::generate_fulltext_word_rows(allocator_,
+                                                            &ft_parse_helper_,
+                                                            ft_meta,
+                                                            doc_id_datum,
+                                                            ft,
+                                                            is_fts_index_aux,
+                                                            rows_))) {
+    if (OB_ITER_END == ret) {
+      // 空白文档也占位，保证缓存行号与文档顺序严格对齐
+      record_ft_word_rows(ft, parser_name, ft_meta, is_fts_index_aux, cur_idx, row_begin);
+    }
+  } else {
+    record_ft_word_rows(ft, parser_name, ft_meta, is_fts_index_aux, cur_idx, row_begin);
+  }
+  return ret;
+}
+
+int ObFTDMLIterator::record_ft_word_rows(const ObString &ft,
+                                         const ObString &parser_name,
+                                         const common::ObObjMeta &ft_meta,
+                                         const bool is_fts_index_aux,
+                                         const int64_t cur_idx,
+                                         const int64_t row_begin)
+{
+  int ret = OB_SUCCESS;
+  const int64_t row_cnt = rows_.count() - row_begin;
+  if (cache_record_stopped_
+      || cache_epoch_ != pass_epoch_  // 复用趟不写缓存，避免行号错位
+      || cur_idx >= MAX_CACHED_FT_ROWS
+      || ft_word_cache_items_.count() >= MAX_CACHED_FT_ITEMS) {
+    cache_record_stopped_ = true;
+  } else {
+    const int64_t word_idx = is_fts_index_aux ? 0 : 1;
+    ObFTWordCacheRow cache_row;
+    ObString ft_copy;
+    ObString parser_copy;
+    cache_row.item_begin_ = ft_word_cache_items_.count();
+    cache_row.item_count_ = row_cnt;
+    cache_row.obj_type_ = static_cast<int64_t>(ft_meta.get_type());
+    cache_row.collation_type_ = static_cast<int64_t>(ft_meta.get_collation_type());
+    if (OB_FAIL(ob_write_string(ft_word_cache_alloc_, parser_name, parser_copy))
+        || OB_FAIL(ob_write_string(ft_word_cache_alloc_, ft, ft_copy))) {
+      cache_record_stopped_ = true;
+      ret = OB_SUCCESS;
+    } else {
+      cache_row.parser_name_ = parser_copy;
+      cache_row.ft_ = ft_copy;
+      for (int64_t i = 0; OB_SUCC(ret) && i < row_cnt; ++i) {
+        ObFTWordCacheItem item;
+        ObString word_copy;
+        const ObString &src_word = rows_.at(row_begin + i)->storage_datums_[word_idx].get_string();
+        if (OB_FAIL(ob_write_string(ft_word_cache_alloc_, src_word, word_copy))) {
+          cache_record_stopped_ = true;
+          ret = OB_SUCCESS;
+        } else {
+          item.word_ = word_copy;
+          item.word_cnt_ = rows_.at(row_begin + i)->storage_datums_[2].get_uint64();
+          item.doc_len_ = rows_.at(row_begin + i)->storage_datums_[3].get_uint64();
+          if (OB_FAIL(ft_word_cache_items_.push_back(item))) {
+            cache_record_stopped_ = true;
+            ret = OB_SUCCESS;
+          }
+        }
+      }
+      if (cache_record_stopped_) {
+        // 回滚本次未完成的记录，保证缓存行号与文档顺序对齐
+        while (ft_word_cache_items_.count() > cache_row.item_begin_) {
+          ft_word_cache_items_.pop_back();
+        }
+      } else if (OB_FAIL(ft_word_cache_rows_.push_back(cache_row))) {
+        cache_record_stopped_ = true;
+        ret = OB_SUCCESS;
+      }
     }
   }
   return ret;
