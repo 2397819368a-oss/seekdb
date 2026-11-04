@@ -79,6 +79,9 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (word.get_collation_type() == stopword_type_.get_collation_type()) {
+    // 内置停用词表全部是长度小于 FTS_STOP_WORD_MAX_LENGTH 的 ASCII 英文单词，
+    // 因此含非 ASCII 字节（如中文）或长度超长的 token 必然不是停用词，
+    // 可直接返回，省掉一次 UTF-8 串哈希与哈希表探测。
     const ObString &word_str = word.get_word().get_string();
     bool may_be_stopword = word_str.length() < FTS_STOP_WORD_MAX_LENGTH;
     for (int64_t i = 0; may_be_stopword && i < word_str.length(); ++i) {
@@ -89,6 +92,7 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
     if (!may_be_stopword) {
       is_stopword = false;
     } else {
+      // 同一 collation 下无需字符集转换，直接查表，避免每个 token 构造临时 arena
       ret = stopword_set_.exist_refactored(word);
       if (OB_HASH_NOT_EXIST == ret) {
         is_stopword = false;
@@ -103,6 +107,7 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
   } else {
     common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
     common::ObString cmp_str;
+    // do nothing set out with in if type is the same.
     if (OB_FAIL(common::ObCharset::charset_convert(
                                        allocator,
                                        word.get_word().get_string(),
@@ -120,6 +125,7 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
         ret = OB_SUCCESS;
       } else if (OB_SUCC(ret)) {
         ret = OB_ERR_UNEXPECTED;
+      } else {
       }
     }
   }
@@ -185,11 +191,16 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
     const ObString src_str = src.get_word().get_string();
     const char *str = src_str.ptr();
     bool need_casedown = false;
+    // Case folding only changes ASCII letters and characters outside the CJK
+    // block.  Tokens made of lowercase ASCII or Chinese characters are already
+    // folded, so reuse the input slice instead of copying and re-scanning it.
     for (int64_t i = 0; !need_casedown && i < src_str.length(); ++i) {
       const unsigned char c = static_cast<unsigned char>(str[i]);
       if (c < 0x80) {
         need_casedown = (c >= 'A' && c <= 'Z');
       } else if (c >= 0xC2 && (c < 0xE4 || c > 0xE9)) {
+        // Latin-1 supplement / Greek / Cyrillic / full-width letters can have
+        // case mappings; CJK code points (UTF-8 lead 0xE4-0xE9) never do.
         need_casedown = true;
       }
     }
@@ -231,16 +242,21 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
 int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
 {
   int ret = OB_SUCCESS;
+  int64_t word_count = 0;
   if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (!flag_.groupby_word()) {
     if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
     }
+  } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
   } else {
-    auto add_frequency = [word_freq](common::hash::HashMapPair<ObFTWord, int64_t> &entry) {
-      entry.second += word_freq;
-    };
-    ret = word_map_.set_or_update(word, 1/*word count*/, add_frequency);
+    if (OB_HASH_NOT_EXIST == ret) {
+      word_count = 1;
+    } else {
+      word_count += word_freq;
+    }
+    if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
+    }
   }
   return ret;
 }
