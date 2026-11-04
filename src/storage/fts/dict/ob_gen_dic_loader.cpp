@@ -98,7 +98,7 @@ int ObGenDicLoader::ObGenDicLoaderKey::set_parser_name(const ObString &parser_na
 int ObGenDicLoader::init()
 {
   int ret = OB_SUCCESS;
-  const uint64_t cap = 16;
+  const uint64_t cap = 67;
   TCWLockGuard guard(lock_);
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
