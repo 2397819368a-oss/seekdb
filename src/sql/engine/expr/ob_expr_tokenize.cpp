@@ -62,7 +62,7 @@ struct ObTokenizeHelperCacheEntry
   common::ObString reformed_properties_;
   bool valid_ = false;
 };
-constexpr int64_t TOKENIZE_HELPER_CACHE_SIZE = 12;
+constexpr int64_t TOKENIZE_HELPER_CACHE_SIZE = 8;
 struct ObTokenizeHelperCache
 {
   ObTokenizeHelperCacheEntry entries_[TOKENIZE_HELPER_CACHE_SIZE];
@@ -111,8 +111,8 @@ struct ObTokenizeResultCacheEntry
   bool valid_ = false;
 };
 constexpr int64_t TOKENIZE_RESULT_MAX_LENGTH = 65536;
-constexpr int64_t TOKENIZE_RESULT_CACHE_SLOTS = 96;
-constexpr int64_t TOKENIZE_REPEAT_HINT_SLOTS = 192;
+constexpr int64_t TOKENIZE_RESULT_CACHE_SLOTS = 64;
+constexpr int64_t TOKENIZE_REPEAT_HINT_SLOTS = 128;
 
 struct ObTokenizeResultCache
 {
