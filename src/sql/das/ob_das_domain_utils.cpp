@@ -16,6 +16,8 @@
 
 #include "config_bridge.h"
 #include <mutex>
+#include <cstring>
+#include "lib/allocator/ob_malloc.h"
 #include "lib/container/ob_se_array.h"
 #include "common/json_type/ob_json_bin.h"
 #include "share/ob_errno.h"
