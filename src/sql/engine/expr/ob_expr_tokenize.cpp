@@ -111,8 +111,8 @@ struct ObTokenizeResultCacheEntry
   bool valid_ = false;
 };
 constexpr int64_t TOKENIZE_RESULT_MAX_LENGTH = 65536;
-constexpr int64_t TOKENIZE_RESULT_CACHE_SLOTS = 64;
-constexpr int64_t TOKENIZE_REPEAT_HINT_SLOTS = 128;
+constexpr int64_t TOKENIZE_RESULT_CACHE_SLOTS = 96;
+constexpr int64_t TOKENIZE_REPEAT_HINT_SLOTS = 192;
 
 struct ObTokenizeResultCache
 {
