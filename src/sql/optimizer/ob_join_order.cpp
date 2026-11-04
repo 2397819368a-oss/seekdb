@@ -16654,7 +16654,7 @@ int ObJoinOrder::get_query_tokens_by_boolean_mode(ObMatchFunRawExpr *match_expr,
       FtsNode *node = fts_parser->root_;
       ObFtsEvalNode *parant_node =nullptr;
       hash::ObHashMap<ObString, int32_t> tokens_map;
-      const int64_t ft_word_bkt_cnt = MAX(search_text_string.length() / 3, 3);
+      const int64_t ft_word_bkt_cnt = MAX(search_text_string.length() / 10, 2);
       ObArray<ObString> query_token;
       bool dummy_has_duplicate_boolean_tokens = false;
       if (OB_FAIL(tokens_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
