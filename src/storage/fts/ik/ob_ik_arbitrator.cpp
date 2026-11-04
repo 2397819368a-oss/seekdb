@@ -302,7 +302,7 @@ int ObIKArbitrator::prepare(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
 
-  int cal_bucket_num = MAX(ctx.fulltext_len() / 80, 10);
+  int cal_bucket_num = MAX(ctx.fulltext_len() / 60, 10);
   cal_bucket_num = MIN(cal_bucket_num, 499);
   if (OB_FAIL(chains_.create(cal_bucket_num, ObMemAttr("IK ARBITRATE")))) {
   }
