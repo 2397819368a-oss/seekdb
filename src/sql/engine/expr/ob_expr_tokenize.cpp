@@ -239,7 +239,7 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
       hp = &entry.helper_; hp->rebind_allocator(&allocator); break;
     }
   }
-  const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 5, 3), 499);
+  const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 4, 3), 599);
   int64_t doc_len = 0;
   storage::ObFTWordMap token_map;
 
