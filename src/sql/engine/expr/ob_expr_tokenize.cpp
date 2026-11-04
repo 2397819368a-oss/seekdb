@@ -62,7 +62,7 @@ struct ObTokenizeHelperCacheEntry
   common::ObString reformed_properties_;
   bool valid_ = false;
 };
-constexpr int64_t TOKENIZE_HELPER_CACHE_SIZE = 8;
+constexpr int64_t TOKENIZE_HELPER_CACHE_SIZE = 12;
 struct ObTokenizeHelperCache
 {
   ObTokenizeHelperCacheEntry entries_[TOKENIZE_HELPER_CACHE_SIZE];
