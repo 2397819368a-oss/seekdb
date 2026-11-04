@@ -15,6 +15,7 @@
  */
 
 #include "config_bridge.h"
+#include <mutex>
 #include "lib/container/ob_se_array.h"
 #include "common/json_type/ob_json_bin.h"
 #include "share/ob_errno.h"
@@ -274,6 +275,224 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
   return ret;
 }
 
+namespace
+{
+// fts_index_aux 与 fts_doc_word_aux 由两趟独立的基表扫描生成，同一列文本在后续 DDL 中还可能
+// 被同一种 parser 再次分词。这里按 (parser 身份, 列 meta, 文本) 缓存分词结果，命中时只重建行。
+// 缓存为进程级、只增不删：条目内存单独用 ob_malloc 持有，保证已写进行里的 word 指针一直有效。
+static const int64_t FT_WORD_CACHE_BUCKET_CNT = 1L << 16;
+static const int64_t FT_WORD_CACHE_MAX_ENTRIES = 200000;
+static const int64_t FT_WORD_CACHE_MAX_BYTES = 192L * 1024 * 1024;
+static const int64_t FT_WORD_CACHE_MAX_TEXT_LEN = 8192;
+
+struct ObFTWordCacheItem
+{
+  int32_t word_off_;  // offset in entry word_bytes_
+  int32_t word_len_;
+  int64_t word_cnt_;
+};
+
+struct ObFTWordCacheEntry
+{
+  uint64_t hash_;
+  uint64_t parser_identity_;
+  int32_t collation_type_;
+  int32_t obj_type_;
+  int32_t text_len_;
+  int32_t item_cnt_;
+  int64_t doc_length_;
+  const char *text_;
+  const char *word_bytes_;
+  const ObFTWordCacheItem *items_;
+  ObFTWordCacheEntry *next_;
+};
+
+struct ObFTWordCache
+{
+  ObFTWordCache() : used_bytes_(0), entry_cnt_(0), stopped_(false)
+  {
+    ::memset(buckets_, 0, sizeof(buckets_));
+  }
+  std::mutex lock_;
+  ObFTWordCacheEntry *buckets_[FT_WORD_CACHE_BUCKET_CNT];
+  int64_t used_bytes_;
+  int64_t entry_cnt_;
+  bool stopped_;
+};
+
+static ObFTWordCache &get_ft_word_cache()
+{
+  static ObFTWordCache cache;
+  return cache;
+}
+
+static uint64_t calc_ft_word_cache_hash(const uint64_t parser_identity,
+                                        const int32_t collation_type,
+                                        const int32_t obj_type,
+                                        const char *text,
+                                        const int32_t text_len)
+{
+  uint64_t hash = parser_identity
+                ^ (static_cast<uint64_t>(collation_type) << 32)
+                ^ static_cast<uint64_t>(obj_type);
+  for (int64_t i = 0; i < text_len; ++i) {
+    hash = (hash ^ static_cast<uint64_t>(static_cast<unsigned char>(text[i]))) * 1099511628211ULL;
+  }
+  hash = (hash ^ static_cast<uint64_t>(text_len)) * 1099511628211ULL;
+  hash ^= hash >> 33;
+  hash *= 0xff51afd7ed558ccdULL;
+  hash ^= hash >> 33;
+  return hash;
+}
+
+static const ObFTWordCacheEntry *find_ft_word_cache_locked(const ObFTWordCache &cache,
+                                                          const uint64_t hash,
+                                                          const uint64_t parser_identity,
+                                                          const int32_t collation_type,
+                                                          const int32_t obj_type,
+                                                          const char *text,
+                                                          const int32_t text_len)
+{
+  const ObFTWordCacheEntry *result = nullptr;
+  const ObFTWordCacheEntry *entry = cache.buckets_[hash & (FT_WORD_CACHE_BUCKET_CNT - 1)];
+  for (; nullptr != entry && nullptr == result; entry = entry->next_) {
+    if (entry->hash_ == hash
+        && entry->parser_identity_ == parser_identity
+        && entry->collation_type_ == collation_type
+        && entry->obj_type_ == obj_type
+        && entry->text_len_ == text_len
+        && 0 == ::memcmp(entry->text_, text, static_cast<size_t>(text_len))) {
+      result = entry;
+    }
+  }
+  return result;
+}
+
+static const ObFTWordCacheEntry *lookup_ft_word_cache(const uint64_t parser_identity,
+                                                     const ObObjMeta &meta,
+                                                     const ObString &text)
+{
+  const int32_t collation_type = static_cast<int32_t>(meta.get_collation_type());
+  const int32_t obj_type = static_cast<int32_t>(meta.get_type());
+  const uint64_t hash = calc_ft_word_cache_hash(
+      parser_identity, collation_type, obj_type, text.ptr(), static_cast<int32_t>(text.length()));
+  ObFTWordCache &cache = get_ft_word_cache();
+  std::lock_guard<std::mutex> guard(cache.lock_);
+  return find_ft_word_cache_locked(
+      cache, hash, parser_identity, collation_type, obj_type, text.ptr(), static_cast<int32_t>(text.length()));
+}
+
+static void store_ft_word_cache(const uint64_t parser_identity,
+                                const ObObjMeta &meta,
+                                const ObString &text,
+                                const int64_t doc_length,
+                                const ObFTWordMap &words)
+{
+  int64_t word_bytes_len = 0;
+  bool need_store = !text.empty() && text.length() <= FT_WORD_CACHE_MAX_TEXT_LEN;
+  for (ObFTWordMap::const_iterator iter = words.begin(); need_store && iter != words.end(); ++iter) {
+    word_bytes_len += iter->first.get_word().get_string().length();
+  }
+  if (need_store) {
+    const int32_t collation_type = static_cast<int32_t>(meta.get_collation_type());
+    const int32_t obj_type = static_cast<int32_t>(meta.get_type());
+    const int32_t text_len = static_cast<int32_t>(text.length());
+    const int64_t item_cnt = words.size();
+    const uint64_t hash = calc_ft_word_cache_hash(
+        parser_identity, collation_type, obj_type, text.ptr(), text_len);
+    const int64_t total_size = static_cast<int64_t>(sizeof(ObFTWordCacheEntry))
+                             + item_cnt * static_cast<int64_t>(sizeof(ObFTWordCacheItem))
+                             + word_bytes_len + text_len;
+    ObFTWordCache &cache = get_ft_word_cache();
+    std::lock_guard<std::mutex> guard(cache.lock_);
+    if (cache.stopped_) {
+    } else if (cache.entry_cnt_ >= FT_WORD_CACHE_MAX_ENTRIES
+               || cache.used_bytes_ + total_size > FT_WORD_CACHE_MAX_BYTES) {
+      cache.stopped_ = true;
+    } else if (nullptr != find_ft_word_cache_locked(
+                   cache, hash, parser_identity, collation_type, obj_type, text.ptr(), text_len)) {
+      // 其它线程已经写入同样的 key
+    } else {
+      char *block = static_cast<char *>(common::ob_malloc(total_size, common::ObMemAttr("FTWordCache")));
+      if (nullptr != block) {
+        ObFTWordCacheEntry *entry = reinterpret_cast<ObFTWordCacheEntry *>(block);
+        char *items_buf = block + sizeof(ObFTWordCacheEntry);
+        ObFTWordCacheItem *items = reinterpret_cast<ObFTWordCacheItem *>(items_buf);
+        char *word_bytes = items_buf + item_cnt * static_cast<int64_t>(sizeof(ObFTWordCacheItem));
+        char *text_buf = word_bytes + word_bytes_len;
+        int32_t word_off = 0;
+        int64_t i = 0;
+        for (ObFTWordMap::const_iterator iter = words.begin(); iter != words.end(); ++iter, ++i) {
+          const ObString &word = iter->first.get_word().get_string();
+          items[i].word_off_ = word_off;
+          items[i].word_len_ = static_cast<int32_t>(word.length());
+          items[i].word_cnt_ = iter->second;
+          if (!word.empty()) {
+            ::memcpy(word_bytes + word_off, word.ptr(), static_cast<size_t>(word.length()));
+            word_off += static_cast<int32_t>(word.length());
+          }
+        }
+        if (!text.empty()) {
+          ::memcpy(text_buf, text.ptr(), static_cast<size_t>(text_len));
+        }
+        entry->hash_ = hash;
+        entry->parser_identity_ = parser_identity;
+        entry->collation_type_ = collation_type;
+        entry->obj_type_ = obj_type;
+        entry->text_len_ = text_len;
+        entry->item_cnt_ = static_cast<int32_t>(item_cnt);
+        entry->doc_length_ = doc_length;
+        entry->text_ = text_buf;
+        entry->word_bytes_ = word_bytes;
+        entry->items_ = items;
+        entry->next_ = cache.buckets_[hash & (FT_WORD_CACHE_BUCKET_CNT - 1)];
+        cache.buckets_[hash & (FT_WORD_CACHE_BUCKET_CNT - 1)] = entry;
+        cache.used_bytes_ += total_size;
+        ++cache.entry_cnt_;
+      }
+    }
+  }
+}
+
+static int build_word_rows_from_ft_cache(common::ObIAllocator &allocator,
+                                         const ObFTWordCacheEntry &entry,
+                                         const ObDatum &doc_id_datum,
+                                         const bool is_fts_index_aux,
+                                         ObDomainIndexRow &word_rows)
+{
+  int ret = OB_SUCCESS;
+  static const int64_t FT_WORD_DOC_COL_CNT = 4;
+  if (0 == entry.item_cnt_) {
+    ret = OB_ITER_END;
+  } else {
+    void *rows_buf = nullptr;
+    blocksstable::ObDatumRow *rows = nullptr;
+    if (OB_ISNULL(rows_buf = reinterpret_cast<char *>(allocator.alloc(
+                      entry.item_cnt_ * static_cast<int64_t>(sizeof(blocksstable::ObDatumRow))))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      rows = new (rows_buf) blocksstable::ObDatumRow[entry.item_cnt_];
+      const int64_t word_idx = is_fts_index_aux ? 0 : 1;
+      const int64_t doc_id_idx = is_fts_index_aux ? 1 : 0;
+      for (int64_t i = 0; OB_SUCC(ret) && i < entry.item_cnt_; ++i) {
+        const ObFTWordCacheItem &item = entry.items_[i];
+        if (OB_FAIL(rows[i].init(allocator, FT_WORD_DOC_COL_CNT))) {
+        } else {
+          rows[i].storage_datums_[word_idx].set_string(
+              ObString(item.word_len_, entry.word_bytes_ + item.word_off_));
+          rows[i].storage_datums_[doc_id_idx].shallow_copy_from_datum(doc_id_datum);
+          rows[i].storage_datums_[2].set_uint(static_cast<uint64_t>(item.word_cnt_));
+          rows[i].storage_datums_[3].set_uint(static_cast<uint64_t>(entry.doc_length_));
+          if (OB_FAIL(word_rows.push_back(&rows[i]))) {
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+}  // namespace
+
 /*static*/ int ObDASDomainUtils::generate_fulltext_word_rows(common::ObIAllocator &allocator,
                                                              storage::ObFTParseHelper *helper,
                                                              const common::ObObjMeta &ft_obj_meta,
@@ -290,10 +509,15 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
   ObFTWordMap ft_word_map;
   void *rows_buf = nullptr;
   blocksstable::ObDatumRow *rows = nullptr;
+  const uint64_t parser_identity = (nullptr == helper) ? 0 : helper->get_parser_identity();
+  const ObFTWordCacheEntry *cached_ft_words = nullptr;
   if (OB_ISNULL(helper) || OB_UNLIKELY(!ft_obj_meta.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (0 == fulltext.length()) {
     ret = OB_ITER_END;
+  } else if (nullptr != (cached_ft_words = lookup_ft_word_cache(parser_identity, ft_obj_meta, fulltext))) {
+    // 命中跨趟分词缓存：只按当前 aux 表的列顺序重建行，不再重复分词
+    ret = build_word_rows_from_ft_cache(allocator, *cached_ft_words, doc_id_datum, is_fts_index_aux, word_rows);
   } else if (OB_FAIL(ft_word_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
   } else if (OB_FAIL(segment_and_calc_word_count(allocator,
                                                  helper,
@@ -302,6 +526,7 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
                                                  doc_length,
                                                  ft_word_map))) {
   } else if (0 == ft_word_map.size()) {
+    store_ft_word_cache(parser_identity, ft_obj_meta, fulltext, doc_length, ft_word_map);
     ret = OB_ITER_END;
   } else if (OB_ISNULL(rows_buf = reinterpret_cast<char *>(
                            allocator.alloc(ft_word_map.size() * sizeof(blocksstable::ObDatumRow))))) {
@@ -332,6 +557,9 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
           ++i;
         }
       }
+    }
+    if (OB_SUCC(ret)) {
+      store_ft_word_cache(parser_identity, ft_obj_meta, fulltext, doc_length, ft_word_map);
     }
   }
   return ret;

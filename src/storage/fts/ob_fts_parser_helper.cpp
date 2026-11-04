@@ -309,12 +309,29 @@ int ObFTParseHelper::segment(
   return ret;
 }
 
+static uint64_t calc_parser_identity(const common::ObString &parser_name,
+                                     const common::ObString &parser_properties)
+{
+  // FNV-1a over (name, name_len, properties, properties_len)
+  uint64_t hash = 1469598103934665603ULL;
+  for (int64_t i = 0; i < parser_name.length(); ++i) {
+    hash = (hash ^ static_cast<uint64_t>(static_cast<unsigned char>(parser_name.ptr()[i]))) * 1099511628211ULL;
+  }
+  hash = (hash ^ static_cast<uint64_t>(parser_name.length())) * 1099511628211ULL;
+  for (int64_t i = 0; i < parser_properties.length(); ++i) {
+    hash = (hash ^ static_cast<uint64_t>(static_cast<unsigned char>(parser_properties.ptr()[i]))) * 1099511628211ULL;
+  }
+  hash = (hash ^ static_cast<uint64_t>(parser_properties.length())) * 1099511628211ULL;
+  return hash;
+}
+
 ObFTParseHelper::ObFTParseHelper()
     : allocator_(nullptr),
     parser_desc_(nullptr),
     parser_name_(),
     add_word_flag_(),
     parser_property_(),
+    parser_identity_(0),
     is_inited_(false)
 {
 }
@@ -336,6 +353,7 @@ int ObFTParseHelper::init(
     ret = OB_INVALID_ARGUMENT;
   } else {
     // Try process-level cache first — avoids re-parsing JSON properties.
+    parser_identity_ = calc_parser_identity(parser_name, parser_properties);
     ObFTParseHelperCache::CachedInitResult cached;
     if (OB_SUCC(ObFTParseHelperCache::lookup(parser_name, parser_properties, cached))) {
       parser_name_      = cached.parser_name;
@@ -374,6 +392,7 @@ void ObFTParseHelper::reset()
   parser_desc_ = nullptr;
   allocator_ = nullptr;
   add_word_flag_.clear();
+  parser_identity_ = 0;
   is_inited_ = false;
 }
 

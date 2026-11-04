@@ -181,6 +181,11 @@ public:
       const common::ObString &parser_properties,
       bool &is_same) const;
   /**
+   * Identity of the parser, computed from the parser name and properties passed to init().
+   * Used as a part of the key of the cross-pass tokenization result cache.
+   */
+  OB_INLINE uint64_t get_parser_identity() const { return parser_identity_; }
+  /**
    * Make json document for fulltext search
    *
    * @param[in] words, word lists after segment
@@ -234,6 +239,7 @@ private:
   ObFTParser parser_name_;
   ObAddWordFlag add_word_flag_;
   ObFTParserProperty parser_property_;
+  uint64_t parser_identity_;
   bool is_inited_;
 
 private:
