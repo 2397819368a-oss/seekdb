@@ -2512,7 +2512,11 @@ int ObTscCgService::generate_index_merge_node_ctdef(const ObLogTableScan &op,
             }
           }
           // for fts, try to unsort in the das level
-          if (OB_SUCC(ret) && OB_NOT_NULL(child_ctdef) && !child->ap_->is_ordered_by_pk_) {
+          // single FTS child: no union merge is needed, so rowkey order is not
+          // required for merge correctness; skipping the sort lets an upper
+          // LIMIT short-circuit the fts scan instead of draining all hits.
+          if (OB_SUCC(ret) && OB_NOT_NULL(child_ctdef) && !child->ap_->is_ordered_by_pk_
+              && !(1 == children_cnt && INDEX_MERGE_FTS_INDEX == child->node_type_)) {
             // for non-ROR situations, we need to insert a sort iter
             ObDASSortCtDef *sort_ctdef = nullptr;
             ObSEArray<OrderItem, 2> order_items;
