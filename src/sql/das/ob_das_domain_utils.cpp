@@ -25,6 +25,7 @@
 #include "sql/das/ob_das_dml_vec_iter.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "observer/omt/ob_tenant_srs.h"
+#include "storage/blocksstable/ob_datum_row_utils.h"
 #include "storage/tx/ob_trans_service.h"
 
 using namespace oceanbase::common;
@@ -820,13 +821,11 @@ int ObDomainDMLIterator::get_next_domain_rows(blocksstable::ObDatumRow *&row, in
       batch_capacity_ = 0;
     }
     if (OB_SUCC(ret) && OB_ISNULL(batch_rows_)) {
-      void *rows_buf = nullptr;
-      if (OB_ISNULL(rows_buf = allocator_.alloc(sizeof(blocksstable::ObDatumRow) * FTS_DOMAIN_BATCH_ROW_COUNT))) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_WARN("fail to allocate batch rows buffer", K(ret));
+      // 复用仓库标准辅助函数分配连续的行缓冲，随后逐行浅拷贝覆盖 datum 指针
+      if (OB_FAIL(blocksstable::ObDatumRowUtils::ob_create_rows(
+              allocator_, FTS_DOMAIN_BATCH_ROW_COUNT, FTS_DOMAIN_COL_CNT, batch_rows_))) {
+        LOG_WARN("fail to create batch rows", K(ret));
       } else {
-        // 行内的 datum 直接指向各篇文档已生成的词条行（浅拷贝），因此这里只需连续的行对象
-        batch_rows_ = new (rows_buf) blocksstable::ObDatumRow[FTS_DOMAIN_BATCH_ROW_COUNT];
         batch_capacity_ = FTS_DOMAIN_BATCH_ROW_COUNT;
       }
     }
