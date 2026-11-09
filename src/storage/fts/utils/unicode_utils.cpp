@@ -19,6 +19,9 @@
 #include "lib/charset/ob_charset_string_helper.h"
 #include "lib/utility/ob_macro_utils.h"
 
+#include <algorithm>
+#include <cstring>
+
 namespace oceanbase
 {
 namespace storage
@@ -154,31 +157,37 @@ ob_wc_t ObUnicodeBlockUtils::get_unicode_from_u8(const char *input, const uint8_
 bool ObUnicodeBlockUtils::is_unicode_cn_number(ob_wc_t unicode)
 {
   // Chinese numerical characters: "一二两三四五六七八九十零壹贰叁肆伍陆柒捌玖拾百千万亿拾佰仟萬億兆卅廿"
-  static const ob_wc_t cn_number_array[] = {
-      OB_IK_GET_NUMBER_UNICODE("一"), OB_IK_GET_NUMBER_UNICODE("二"),
-      OB_IK_GET_NUMBER_UNICODE("两"), OB_IK_GET_NUMBER_UNICODE("三"),
-      OB_IK_GET_NUMBER_UNICODE("四"), OB_IK_GET_NUMBER_UNICODE("五"),
-      OB_IK_GET_NUMBER_UNICODE("六"), OB_IK_GET_NUMBER_UNICODE("七"),
-      OB_IK_GET_NUMBER_UNICODE("八"), OB_IK_GET_NUMBER_UNICODE("九"),
-      OB_IK_GET_NUMBER_UNICODE("十"), OB_IK_GET_NUMBER_UNICODE("零"),
-      OB_IK_GET_NUMBER_UNICODE("壹"), OB_IK_GET_NUMBER_UNICODE("贰"),
-      OB_IK_GET_NUMBER_UNICODE("叁"), OB_IK_GET_NUMBER_UNICODE("肆"),
-      OB_IK_GET_NUMBER_UNICODE("伍"), OB_IK_GET_NUMBER_UNICODE("陆"),
-      OB_IK_GET_NUMBER_UNICODE("柒"), OB_IK_GET_NUMBER_UNICODE("捌"),
-      OB_IK_GET_NUMBER_UNICODE("玖"), OB_IK_GET_NUMBER_UNICODE("拾"),
-      OB_IK_GET_NUMBER_UNICODE("百"), OB_IK_GET_NUMBER_UNICODE("千"),
-      OB_IK_GET_NUMBER_UNICODE("万"), OB_IK_GET_NUMBER_UNICODE("亿"),
-      OB_IK_GET_NUMBER_UNICODE("拾"), OB_IK_GET_NUMBER_UNICODE("佰"),
-      OB_IK_GET_NUMBER_UNICODE("仟"), OB_IK_GET_NUMBER_UNICODE("萬"),
-      OB_IK_GET_NUMBER_UNICODE("億"), OB_IK_GET_NUMBER_UNICODE("兆"),
-      OB_IK_GET_NUMBER_UNICODE("卅"), OB_IK_GET_NUMBER_UNICODE("廿"),
-  };
-  for (int i = 0; i < sizeof(cn_number_array) / sizeof(cn_number_array[0]); i++) {
-    if (unicode == cn_number_array[i]) {
-      return true;
+  // Sorted once at first use; binary search instead of a per-char linear scan.
+  struct CnNumberTable
+  {
+    ob_wc_t values[34];
+    CnNumberTable()
+    {
+      static const ob_wc_t raw[] = {
+          OB_IK_GET_NUMBER_UNICODE("一"), OB_IK_GET_NUMBER_UNICODE("二"),
+          OB_IK_GET_NUMBER_UNICODE("两"), OB_IK_GET_NUMBER_UNICODE("三"),
+          OB_IK_GET_NUMBER_UNICODE("四"), OB_IK_GET_NUMBER_UNICODE("五"),
+          OB_IK_GET_NUMBER_UNICODE("六"), OB_IK_GET_NUMBER_UNICODE("七"),
+          OB_IK_GET_NUMBER_UNICODE("八"), OB_IK_GET_NUMBER_UNICODE("九"),
+          OB_IK_GET_NUMBER_UNICODE("十"), OB_IK_GET_NUMBER_UNICODE("零"),
+          OB_IK_GET_NUMBER_UNICODE("壹"), OB_IK_GET_NUMBER_UNICODE("贰"),
+          OB_IK_GET_NUMBER_UNICODE("叁"), OB_IK_GET_NUMBER_UNICODE("肆"),
+          OB_IK_GET_NUMBER_UNICODE("伍"), OB_IK_GET_NUMBER_UNICODE("陆"),
+          OB_IK_GET_NUMBER_UNICODE("柒"), OB_IK_GET_NUMBER_UNICODE("捌"),
+          OB_IK_GET_NUMBER_UNICODE("玖"), OB_IK_GET_NUMBER_UNICODE("拾"),
+          OB_IK_GET_NUMBER_UNICODE("百"), OB_IK_GET_NUMBER_UNICODE("千"),
+          OB_IK_GET_NUMBER_UNICODE("万"), OB_IK_GET_NUMBER_UNICODE("亿"),
+          OB_IK_GET_NUMBER_UNICODE("拾"), OB_IK_GET_NUMBER_UNICODE("佰"),
+          OB_IK_GET_NUMBER_UNICODE("仟"), OB_IK_GET_NUMBER_UNICODE("萬"),
+          OB_IK_GET_NUMBER_UNICODE("億"), OB_IK_GET_NUMBER_UNICODE("兆"),
+          OB_IK_GET_NUMBER_UNICODE("卅"), OB_IK_GET_NUMBER_UNICODE("廿"),
+      };
+      memcpy(values, raw, sizeof(values));
+      std::sort(values, values + 34);
     }
-  }
-  return false;
+  };
+  static const CnNumberTable table;
+  return std::binary_search(table.values, table.values + 34, unicode);
 }
 
 } //  namespace storage

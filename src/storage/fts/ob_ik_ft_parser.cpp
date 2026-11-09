@@ -37,12 +37,43 @@
 #include "storage/fts/ik/ob_ik_surrogate_processor.h"
 #include "plugin/sys/ob_plugin_mgr.h"
 
+#include <mutex>
+
 using namespace oceanbase::plugin;
 
 namespace oceanbase
 {
 namespace storage
 {
+
+namespace
+{
+// Process-wide shared IK dictionaries. Building an ObFTRangeDict per document
+// (kv cache lookups plus arena/vector allocations) sits in the tokenizer hot
+// path, so the three built-in dicts are built once and reused by every parser
+// instance. The containers keep the kv cache handles pinned for the process
+// lifetime and the dicts are read-only after init, so concurrent use is safe.
+struct IKSharedDicts
+{
+  IKSharedDicts() : alloc_(lib::ObMemAttr("IK Shared Dict")) {}
+  std::mutex m_;
+  bool ready_ = false;
+  common::ObArenaAllocator alloc_;
+  ObFTCacheRangeContainer *cont_main_ = nullptr;
+  ObFTCacheRangeContainer *cont_quan_ = nullptr;
+  ObFTCacheRangeContainer *cont_stop_ = nullptr;
+  ObIFTDict *dict_main_ = nullptr;
+  ObIFTDict *dict_quan_ = nullptr;
+  ObIFTDict *dict_stop_ = nullptr;
+};
+
+IKSharedDicts &ik_shared_dicts()
+{
+  static IKSharedDicts shared;
+  return shared;
+}
+} // anonymous namespace
+
 int ObIKFTParser::init(const ObFTParserParam &param)
 {
   int ret = OB_SUCCESS;
@@ -270,14 +301,14 @@ int ObIKFTParserDesc::get_add_word_flag(ObAddWordFlag &flag) const
 int ObIKFTParser::init_dict(const plugin::ObFTParserParam &param)
 {
   int ret = OB_SUCCESS;
-  ObIFTDict *tmp_dict = nullptr;
+  UNUSED(param);
 
   if (OB_ISNULL(hub_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("Dict hub is not inited", K(ret));
+    return ret;
   }
 
-  ObFTRangeDict *dict = nullptr;
   ObFTDictDesc main_dict_desc("main_dict",
                               ObFTDictType::DICT_IK_MAIN,
                               ObCharsetType::CHARSET_UTF8MB4,
@@ -293,26 +324,44 @@ int ObIKFTParser::init_dict(const plugin::ObFTParserParam &param)
                                   ObCharsetType::CHARSET_UTF8MB4,
                                   ObCollationType::CS_TYPE_UTF8MB4_BIN);
 
-  if (should_read_newest_table()) {
-    // clear dict cache, always false now
-  } else {
-    if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
+  IKSharedDicts &shared = ik_shared_dicts();
+  std::lock_guard<std::mutex> guard(shared.m_);
+  if (!shared.ready_) {
+    if (OB_ISNULL(shared.cont_main_ = OB_NEWx(ObFTCacheRangeContainer, &shared.alloc_, shared.alloc_))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("Failed to alloc main dict container", K(ret));
+    } else if (OB_ISNULL(shared.cont_quan_ = OB_NEWx(ObFTCacheRangeContainer, &shared.alloc_, shared.alloc_))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("Failed to alloc quantifier dict container", K(ret));
+    } else if (OB_ISNULL(shared.cont_stop_ = OB_NEWx(ObFTCacheRangeContainer, &shared.alloc_, shared.alloc_))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("Failed to alloc stopword dict container", K(ret));
+    } else if (OB_FAIL(init_single_dict(main_dict_desc, *shared.cont_main_))) {
       LOG_WARN("Failed to init main dict", K(ret));
-    } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
+    } else if (OB_FAIL(init_single_dict(quan_dict_desc, *shared.cont_quan_))) {
       LOG_WARN("Failed to init quantifier dict", K(ret));
-    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
+    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, *shared.cont_stop_))) {
       LOG_WARN("Failed to init stopword dict", K(ret));
+    } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, *shared.cont_main_, shared.alloc_, shared.dict_main_))) {
+      LOG_WARN("Failed to build dict main", K(ret));
+    } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, *shared.cont_quan_, shared.alloc_, shared.dict_quan_))) {
+      LOG_WARN("Failed to build dict quantifier", K(ret));
+    } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, *shared.cont_stop_, shared.alloc_, shared.dict_stop_))) {
+      LOG_WARN("Failed to build dict stopword", K(ret));
+    } else {
+      shared.ready_ = true;
     }
   }
 
   if (OB_FAIL(ret)) {
-    // already logged.
-  } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
-    LOG_WARN("Failed to build dict main", K(ret));
-  } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
-    LOG_WARN("Failed to build dict quantifier", K(ret));
-  } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
-    LOG_WARN("Failed to build dict stopword", K(ret));
+    // already logged
+  } else if (OB_UNLIKELY(!shared.ready_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("Shared ik dicts not ready", K(ret));
+  } else {
+    dict_main_ = shared.dict_main_;
+    dict_quan_ = shared.dict_quan_;
+    dict_stop_ = shared.dict_stop_;
   }
 
   return ret;
@@ -427,18 +476,11 @@ void ObIKFTParser::reset()
   cache_quan_.reset();
   cache_stop_.reset();
 
-  if (!OB_ISNULL(dict_main_)) {
-    dict_main_->~ObIFTDict();
-    allocator_.free(dict_main_);
-  }
-  if (!OB_ISNULL(dict_quan_)) {
-    dict_quan_->~ObIFTDict();
-    allocator_.free(dict_quan_);
-  }
-  if (!OB_ISNULL(dict_stop_)) {
-    dict_stop_->~ObIFTDict();
-    allocator_.free(dict_stop_);
-  }
+  // dict_main_/dict_quan_/dict_stop_ are process-wide shared dicts owned by
+  // ik_shared_dicts(), not by this parser; never destroy them here.
+  dict_main_ = nullptr;
+  dict_quan_ = nullptr;
+  dict_stop_ = nullptr;
 
   is_inited_ = false;
 }
@@ -446,20 +488,21 @@ void ObIKFTParser::reset()
 bool ObIKFTParser::should_read_newest_table() const { return false; }
 int ObIKFTParser::build_dict_from_cache(const ObFTDictDesc &desc,
                                         ObFTCacheRangeContainer &container,
+                                        common::ObIAllocator &alloc,
                                         ObIFTDict *&dict)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(hub_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("Hub is null", K(ret));
-  } else if (OB_ISNULL(dict = OB_NEWx(ObFTRangeDict, &allocator_, allocator_, &container, desc))) {
+  } else if (OB_ISNULL(dict = OB_NEWx(ObFTRangeDict, &alloc, alloc, &container, desc))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("Failed to alloc dict", K(ret));
   } else if (OB_FAIL(dict->init())) {
     LOG_WARN("Failed to init dict", K(ret));
   }
   if (OB_FAIL(ret)) {
-    OB_DELETEx(ObIFTDict, &allocator_, dict);
+    OB_DELETEx(ObIFTDict, &alloc, dict);
   }
   return ret;
 }

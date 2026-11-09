@@ -455,32 +455,40 @@ template <ObCharsetType CS_TYPE>
 inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, CharType &type)
 {
   int ret = OB_SUCCESS;
-  bool checker = false;
   type = CharType::USELESS;
 
-  if (OB_FAIL(is_alpha<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::ENGLISH_LETTER;
-  } else if (OB_FAIL(is_arabic<CS_TYPE>(input, char_len, checker))) {
-    STORAGE_FTS_LOG(WARN, "Failed to check arabic letter", K(ret));
-  } else if (checker) {
-    type = CharType::ARABIC_LETTER;
-  } else if (OB_FAIL(is_chinese<CS_TYPE>(input, char_len, checker))) {
-    STORAGE_FTS_LOG(WARN, "Failed to check chinese letter", K(ret));
-  } else if (checker) {
-    type = CharType::CHINESE;
-  } else if (OB_FAIL(is_other_cjk<CS_TYPE>(input, char_len, checker))) {
-    STORAGE_FTS_LOG(WARN, "Failed to check other cjk letter", K(ret));
-  } else if (checker) {
-    type = CharType::OTHER_CJK;
-  } else if (OB_FAIL(is_surrogate_high<CS_TYPE>(input, char_len, checker))) {
-    STORAGE_FTS_LOG(WARN, "Failed to check surrogate high letter", K(ret));
-  } else if (checker) {
-    type = CharType::SURROGATE_HIGH;
-  } else if (OB_FAIL(is_surrogate_low<CS_TYPE>(input, char_len, checker))) {
-    STORAGE_FTS_LOG(WARN, "Failed to check surrogate low letter", K(ret));
-  } else if (checker) {
-    type = CharType::SURROGATE_LOW;
+  if (CS_TYPE == CHARSET_UTF8MB4 && 1 == char_len
+      && 0 == (static_cast<uint8_t>(input[0]) & 0x80)) {
+    // ASCII fast path: no unicode decode needed.
+    const uint8_t c = static_cast<uint8_t>(input[0]);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+      type = CharType::ENGLISH_LETTER;
+    } else if (c >= '0' && c <= '9') {
+      type = CharType::ARABIC_LETTER;
+    }
+  } else {
+    // Decode once, then run all range checks on the decoded value.
+    bool checker = false;
+    ob_wc_t unicode = 0;
+    if (OB_FAIL(decode_unicode<CS_TYPE>(input, char_len, unicode))) {
+      STORAGE_FTS_LOG(WARN, "Failed to decode unicode", K(ret));
+    } else if (ObUnicodeBlockUtils::is_alpha(unicode)) {
+      type = CharType::ENGLISH_LETTER;
+    } else if (ObUnicodeBlockUtils::is_arabic(unicode)) {
+      type = CharType::ARABIC_LETTER;
+    } else if (ObUnicodeBlockUtils::is_chinese(unicode)) {
+      type = CharType::CHINESE;
+    } else if (ObUnicodeBlockUtils::is_other_cjk(unicode)) {
+      type = CharType::OTHER_CJK;
+    } else if (OB_FAIL(is_surrogate_high<CS_TYPE>(input, char_len, checker))) {
+      STORAGE_FTS_LOG(WARN, "Failed to check surrogate high letter", K(ret));
+    } else if (checker) {
+      type = CharType::SURROGATE_HIGH;
+    } else if (OB_FAIL(is_surrogate_low<CS_TYPE>(input, char_len, checker))) {
+      STORAGE_FTS_LOG(WARN, "Failed to check surrogate low letter", K(ret));
+    } else if (checker) {
+      type = CharType::SURROGATE_LOW;
+    }
   }
   return ret;
 }

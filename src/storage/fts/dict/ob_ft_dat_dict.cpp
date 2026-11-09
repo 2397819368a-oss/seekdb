@@ -253,25 +253,83 @@ int ObFTDATBuilder<DATA_TYPE>::encode(const ObString &word, ObFTWordCode &code, 
   return ret;
 }
 
+namespace
+{
+// Thread-local direct-mapped cache for single-char -> code lookups in DAT dicts.
+// Codes inside a DAT are immutable once built. Entries are validated against the
+// DAT address plus its (word_num_, array_size_) fingerprint, so they stay correct
+// even if a DAT block is evicted from the kv cache and another DAT is rebuilt at
+// the same address. A rebuild of the same dict is deterministic and produces the
+// same codes, so a matching fingerprint always implies a valid code.
+struct CharCodeCacheEntry
+{
+  const ObFTDAT *dat_;
+  uint32_t key_;
+  int32_t code_;  // >0 valid code; 0 known miss; entry valid iff dat_ != nullptr
+  uint32_t word_num_;
+  uint32_t array_size_;
+};
+constexpr int64_t CHAR_CODE_CACHE_SIZE = 4096;
+thread_local CharCodeCacheEntry char_code_cache[CHAR_CODE_CACHE_SIZE];
+} // anonymous namespace
+
 template <typename DATA_TYPE>
 int ObFTDATReader<DATA_TYPE>::match_with_hit(const ObString &ft_char,
                                              const ObDATrieHit &last_hit,
                                              ObDATrieHit &hit) const
 {
   int ret = OB_SUCCESS;
-  ObFTWordCode code;
+  ObFTWordCode code = 0;
   hit.set_unmatch();
-  auto *map = dat_->get_map();
   int32_t *base = reinterpret_cast<int32_t *>(dat_->buff + dat_->base_offset_);
   int32_t *check = reinterpret_cast<int32_t *>(dat_->buff + dat_->check_offset_);
 
-  ObFTSingleWord word;
-  word.set_word(ft_char.ptr(), ft_char.length());
-  if (OB_FAIL(dat_->get_map()->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
-    LOG_WARN("fail to find word code", K(ret));
-  } else if (OB_ENTRY_NOT_EXIST == ret) {
-    ret = OB_SUCCESS;
-    hit.set_unmatch();
+  bool code_found = false;
+  bool code_known_missing = false;
+  CharCodeCacheEntry *cache_entry = nullptr;
+  uint32_t cache_key = 0;
+  if (ft_char.length() > 0 && ft_char.length() <= static_cast<int64_t>(sizeof(uint32_t))) {
+    MEMCPY(&cache_key, ft_char.ptr(), ft_char.length());
+    const uint64_t cache_idx = ((static_cast<uint64_t>(cache_key) * 2654435761u)
+                                ^ (reinterpret_cast<uintptr_t>(dat_) >> 6))
+                               & (CHAR_CODE_CACHE_SIZE - 1);
+    cache_entry = &char_code_cache[cache_idx];
+    if (cache_entry->dat_ == dat_ && cache_entry->key_ == cache_key
+        && cache_entry->word_num_ == static_cast<uint32_t>(dat_->word_num_)
+        && cache_entry->array_size_ == static_cast<uint32_t>(dat_->array_size_)) {
+      if (cache_entry->code_ > 0) {
+        code = static_cast<ObFTWordCode>(cache_entry->code_);
+        code_found = true;
+      } else {
+        code_known_missing = true;
+      }
+    }
+  }
+
+  if (code_known_missing) {
+    // known to not exist in this DAT, keep unmatch
+  } else if (!code_found) {
+    ObFTSingleWord word;
+    word.set_word(ft_char.ptr(), ft_char.length());
+    if (OB_FAIL(dat_->get_map()->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
+      LOG_WARN("fail to find word code", K(ret));
+    } else if (OB_ENTRY_NOT_EXIST == ret) {
+      ret = OB_SUCCESS;
+      code = 0;
+    } else {
+      // code found
+    }
+    if (OB_SUCC(ret) && nullptr != cache_entry) {
+      cache_entry->dat_ = dat_;
+      cache_entry->key_ = cache_key;
+      cache_entry->code_ = static_cast<int32_t>(code);
+      cache_entry->word_num_ = static_cast<uint32_t>(dat_->word_num_);
+      cache_entry->array_size_ = static_cast<uint32_t>(dat_->array_size_);
+    }
+  }
+
+  if (OB_FAIL(ret) || 0 == code) {
+    // keep unmatch
   } else {
     if (&last_hit == &hit) {
       // sameone

@@ -86,6 +86,7 @@ private:
 
   int build_dict_from_cache(const ObFTDictDesc &desc,
                             ObFTCacheRangeContainer &container,
+                            common::ObIAllocator &alloc,
                             ObIFTDict *&dict);
 
 private:

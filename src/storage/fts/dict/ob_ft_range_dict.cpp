@@ -413,19 +413,34 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+namespace
+{
+// Compare two complete single characters by their UTF-8 bytes.
+// UTF-8 preserves code point ordering, and the ranges are built with
+// CS_TYPE_UTF8MB4_BIN whose comparison on complete characters is plain
+// lexicographic byte comparison, so this is equivalent to (but much cheaper
+// than) two ObCharset::strcmp calls.
+inline int cmp_single_char_bytes(const ObString &a, const ObString &b)
+{
+  const int64_t min_len = MIN(a.length(), b.length());
+  int cmp = 0;
+  if (min_len > 0) {
+    cmp = MEMCMP(a.ptr(), b.ptr(), min_len);
+  }
+  if (0 == cmp) {
+    cmp = a.length() < b.length() ? -1 : (a.length() > b.length() ? 1 : 0);
+  }
+  return cmp;
+}
+} // anonymous namespace
+
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
   bool found = false;
   for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
+    if (cmp_single_char_bytes(range_dicts_[i].start_.get_word(), single_word) <= 0
+        && cmp_single_char_bytes(range_dicts_[i].end_.get_word(), single_word) >= 0) {
       dict = range_dicts_[i].dict_;
       found = true;
     }
