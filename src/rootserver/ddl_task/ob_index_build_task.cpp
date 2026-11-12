@@ -308,6 +308,11 @@ int ObIndexBuildTask::process()
   } else {
     ddl_tracing_.restore_span_hierarchy();
     const ObDDLTaskStatus status = static_cast<ObDDLTaskStatus>(task_status_);
+    if (share::schema::is_fts_index(create_index_arg_.index_type_)) {
+      // FTS 索引（含其 4 张辅助表）的构建任务生命周期很短，等待多为轮询，
+      // 缩短调度间隔以减少固定开销；普通索引任务保持默认节流。
+      set_delay_schedule_time(2L * 1000L);
+    }
     switch (status) {
     case ObDDLTaskStatus::PREPARE: {
       if (OB_FAIL(prepare())) {
